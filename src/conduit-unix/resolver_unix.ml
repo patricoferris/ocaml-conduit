@@ -15,8 +15,6 @@
  *
  *)
 
-open Lwt.Infix
-
 let debug = ref false
 let debug_print = ref Printf.eprintf
 
@@ -31,7 +29,7 @@ let return_endp name svc uri endp =
     !debug_print "Resolver %s: %s %s -> %s\n%!" name (Uri.to_string uri)
       (Sexplib.Sexp.to_string_hum (Resolver.sexp_of_service svc))
       (Sexplib.Sexp.to_string_hum (Conduit.sexp_of_endp endp));
-  Lwt.return endp
+  endp
 
 let is_tls_service =
   (* TODO fill in the blanks. nowhere else to get this information *)
@@ -39,23 +37,33 @@ let is_tls_service =
   | "https" | "imaps" -> true
   | _ -> false
 
+module TODO = struct
+  let getservbyname _ _ = Unix.{
+    s_name = "BLAH";
+    s_aliases = [||];
+    s_port = 8080;
+    s_proto = "udp";
+  }
+
+  let getaddrinfo _ _ _ = []
+end
+
 let system_service name =
   (* TODO memoize *)
-  Lwt.catch
-    (fun () ->
-      Lwt_unix.getservbyname name "tcp" >>= fun s ->
-      let tls = is_tls_service name in
-      let svc = { Resolver.name; port = s.Lwt_unix.s_port; tls } in
-      Lwt.return (Some svc))
-    (function Not_found -> Lwt.return_none | e -> Lwt.fail e)
+  try 
+    let s = TODO.getservbyname name "tcp" in
+    let tls = is_tls_service name in
+    let svc = { Resolver.name; port = s.s_port; tls } in
+    Some svc
+  with Not_found -> None
 
 let static_service name =
   match Uri_services.tcp_port_of_service name with
-  | [] -> Lwt.return_none
+  | [] -> None
   | port :: _ ->
       let tls = is_tls_service name in
       let svc = { Resolver.name; port; tls } in
-      Lwt.return (Some svc)
+      Some svc
 
 let get_host uri =
   match Uri.host uri with
@@ -69,18 +77,16 @@ let get_port service uri =
   match Uri.port uri with None -> service.Resolver.port | Some port -> port
 
 (* Build a default resolver that uses the system gethostbyname and
-   the /etc/services file *)
+  the /etc/services file *)
 let system_resolver service uri =
-  let open Lwt_unix in
   let host = get_host uri in
   let port = get_port service uri in
-  getaddrinfo host (string_of_int port) [ AI_SOCKTYPE SOCK_STREAM ]
-  >>= fun addrinfos ->
+  let addrinfos = TODO.getaddrinfo host (string_of_int port) Unix.[ AI_SOCKTYPE SOCK_STREAM ] in
   (* In case both IPv4 and IPv6 addresses exist, favor IPv4: *)
-  let v4, rest = List.partition (fun i -> i.ai_family = PF_INET) addrinfos in
+  let v4, rest = List.partition (fun i -> i.Unix.ai_family = PF_INET) addrinfos in
   match List.rev_append v4 rest with
   | [] -> return_endp "system" service uri (`Unknown "name resolution failed")
-  | { ai_addr = ADDR_INET (addr, port); _ } :: _ ->
+  | Unix.{ ai_addr = ADDR_INET (addr, port); _ } :: _ ->
       return_endp "system" service uri
         (`TCP (Ipaddr_unix.of_inet_addr addr, port))
   | { ai_addr = ADDR_UNIX file; _ } :: _ ->
@@ -94,10 +100,10 @@ let static_resolver hosts service uri =
 let system =
   let service = system_service in
   let rewrites = [ ("", system_resolver) ] in
-  Resolver_lwt.init ~service ~rewrites ()
+  Resolver.init ~service ~rewrites ()
 
 (* Build a default resolver from a static set of lookup rules *)
 let static hosts =
   let service = static_service in
   let rewrites = [ ("", static_resolver hosts) ] in
-  Resolver_lwt.init ~service ~rewrites ()
+  Resolver.init ~service ~rewrites ()

@@ -23,10 +23,6 @@ type service = { name : string; port : int; tls : bool } [@@deriving sexp]
 (** Module type for a {{!resolution} resolver} that can map URIs to concrete
     {{!Conduit.endp} endpoints} that stream connections can be established with. *)
 module type S = sig
-  type +'a io
-  (** Abstract type of the cooperative threading library used, normally defined
-      via the {!IO} module type *)
-
   type t [@@deriving sexp]
   (** State handle for a running resolver *)
 
@@ -34,11 +30,11 @@ module type S = sig
   (** Abstract type for a service entry, which maps a URI scheme into a protocol
       handler and TCP port *)
 
-  type rewrite_fn = svc -> Uri.t -> Conduit.endp io
+  type rewrite_fn = svc -> Uri.t -> Conduit.endp
   (** A rewrite function resolves a {{!svc} service} and a URI into a concrete
       endpoint. *)
 
-  type service_fn = string -> svc option io
+  type service_fn = string -> svc option
   (** A service function maps the string (such as [http] or [ftp]) from a URI
       scheme into a {{!svc} service} description that includes enough metadata
       about the service to subsequently {{!rewrite_fn} resolve} it into an
@@ -66,86 +62,82 @@ module type S = sig
   val service : t -> service_fn
 
   val resolve_uri :
-    ?rewrites:(string * rewrite_fn) list -> uri:Uri.t -> t -> Conduit.endp io
+    ?rewrites:(string * rewrite_fn) list -> uri:Uri.t -> t -> Conduit.endp
   (** [resolve_uri ?rewrites ~uri t] will use [t] to resolve the [uri] into a
       concrete endpoint. Any [rewrites] that are passed in will be overlayed on
       the existing rules within the [t] resolver, but not otherwise modify it. *)
 end
 
-module Make (IO : Conduit.IO) = struct
-  open IO
 
-  type svc = service [@@deriving sexp]
-  type 'a io = 'a IO.t
+type svc = service [@@deriving sexp]
 
-  type rewrite_fn = service -> Uri.t -> Conduit.endp IO.t [@@deriving sexp]
-  (** A rewrite modifies an input URI with more specialization towards a
-      concrete [endp] *)
+type rewrite_fn = service -> Uri.t -> Conduit.endp [@@deriving sexp]
+(** A rewrite modifies an input URI with more specialization towards a
+    concrete [endp] *)
 
-  type service_fn = string -> service option IO.t [@@deriving sexp]
+type service_fn = string -> service option [@@deriving sexp]
 
-  type t = {
-    default_lookup : rewrite_fn;
-    mutable domains : rewrite_fn Conduit_trie.t;
-    mutable service : service_fn;
-  }
-  [@@deriving sexp]
+type t = {
+  default_lookup : rewrite_fn;
+  mutable domains : rewrite_fn Conduit_trie.t;
+  mutable service : service_fn;
+}
+[@@deriving sexp]
 
-  let default_lookup _ uri =
-    (* TODO log *)
-    let host = match Uri.host uri with None -> "" | Some host -> host in
-    return (`Unknown host)
+let default_lookup _ uri =
+  (* TODO log *)
+  let host = match Uri.host uri with None -> "" | Some host -> host in
+  `Unknown host
 
-  let default_service _name =
-    (* TODO log *)
-    return None
+let default_service _name =
+  (* TODO log *)
+  None
 
-  let host_to_domain_list host =
-    (* TODO: slow, specialise the Trie to be a rev string list instead *)
-    String.concat ~sep:"." (List.rev (String.cuts ~sep:"." host))
+let host_to_domain_list host =
+  (* TODO: slow, specialise the Trie to be a rev string list instead *)
+  String.concat ~sep:"." (List.rev (String.cuts ~sep:"." host))
 
-  let add_rewrite ~host ~f t =
-    t.domains <- Conduit_trie.insert (host_to_domain_list host) f t.domains
+let add_rewrite ~host ~f t =
+  t.domains <- Conduit_trie.insert (host_to_domain_list host) f t.domains
 
-  let set_service ~f t = t.service <- f
-  let service t = t.service
-  let ( ++ ) f g h = f h >>= function None -> g h | x -> return x
+let set_service ~f t = t.service <- f
+let service t = t.service
+let ( ++ ) f g h = match f h with None -> g h | x -> x
 
-  let init ?(service = default_service) ?(rewrites = []) () =
-    let domains = Conduit_trie.empty in
-    let t = { domains; default_lookup; service } in
-    List.iter (fun (host, f) -> add_rewrite ~host ~f t) rewrites;
-    t
+let init ?(service = default_service) ?(rewrites = []) () =
+  let domains = Conduit_trie.empty in
+  let t = { domains; default_lookup; service } in
+  List.iter (fun (host, f) -> add_rewrite ~host ~f t) rewrites;
+  t
 
-  let resolve_uri ?rewrites ~uri t =
-    (* Find the service associated with the URI *)
-    match Uri.scheme uri with
-    | None -> return (`Unknown "no scheme")
-    | Some scheme -> (
-        t.service scheme >>= function
-        | None -> return (`Unknown "unknown scheme")
-        | Some service ->
-            let host =
-              match Uri.host uri with None -> "localhost" | Some host -> host
-            in
-            let trie =
-              (* If there are local rewrites, add them to the trie *)
-              match rewrites with
-              | None -> t.domains
-              | Some rewrites ->
-                  List.fold_left
-                    (fun acc (host, f) ->
-                      Conduit_trie.insert (host_to_domain_list host) f acc)
-                    t.domains rewrites
-            in
-            (* Find the longest prefix function that matches this host *)
-            let fn =
-              match
-                Conduit_trie.longest_prefix (host_to_domain_list host) trie
-              with
-              | None -> t.default_lookup
-              | Some fn -> fn
-            in
-            fn service uri >>= fun endp ->
-            if service.tls then return (`TLS (host, endp)) else return endp)
-end
+let resolve_uri ?rewrites ~uri t =
+  (* Find the service associated with the URI *)
+  match Uri.scheme uri with
+  | None -> `Unknown "no scheme"
+  | Some scheme -> (
+      match t.service scheme with
+      | None -> `Unknown "unknown scheme"
+      | Some service ->
+          let host =
+            match Uri.host uri with None -> "localhost" | Some host -> host
+          in
+          let trie =
+            (* If there are local rewrites, add them to the trie *)
+            match rewrites with
+            | None -> t.domains
+            | Some rewrites ->
+                List.fold_left
+                  (fun acc (host, f) ->
+                    Conduit_trie.insert (host_to_domain_list host) f acc)
+                  t.domains rewrites
+          in
+          (* Find the longest prefix function that matches this host *)
+          let fn =
+            match
+              Conduit_trie.longest_prefix (host_to_domain_list host) trie
+            with
+            | None -> t.default_lookup
+            | Some fn -> fn
+          in
+          let endp = fn service uri in
+          if service.tls then (`TLS (host, endp)) else endp)

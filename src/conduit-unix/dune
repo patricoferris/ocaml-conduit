@@ -1,0 +1,8 @@
+(library
+ (name conduit_unix)
+ (wrapped false)
+ (libraries 
+  eio.unix
+  uri.services
+  ipaddr-sexp
+  ipaddr.unix conduit))
